@@ -1,0 +1,99 @@
+using System;
+using cAlgo.API;
+using cAlgo.API.Internals;
+
+namespace cAlgo.Robots
+{
+    public enum DirectionMode
+    {
+        Both,
+        LongOnly,
+        ShortOnly
+    }
+
+    [Robot(TimeZone = TimeZones.CentralEuropeStandardTime, AccessRights = AccessRights.None)]
+    public class EURUSD_MorningBreakout_Final : Robot
+    {
+        [Parameter("Trade Direction", DefaultValue = DirectionMode.Both)]
+        public DirectionMode Mode { get; set; }
+
+        [Parameter("Risk %", DefaultValue = 1.0)]
+        public double RiskPercentage { get; set; }
+
+        [Parameter("Reward Ratio", DefaultValue = 2.0)]
+        public double RewardRatio { get; set; }
+
+        private double _refHigh, _refLow;
+        private bool _isWaiting;
+        private DateTime _lastTradeDate;
+
+        protected override void OnTick()
+        {
+            var now = Server.Time;
+
+            // Triggered at 08:00 (handles Summer/Winter automatically)
+            if (now.Hour == 8 && now.Minute == 0 && _lastTradeDate.Date != now.Date)
+            {
+                var candle = Bars.Last(1); // 07:50 - 08:00 candle
+                _refHigh = candle.High;
+                _refLow = candle.Low;
+                _isWaiting = true;
+                _lastTradeDate = now.Date;
+                Print("Range set: High {0}, Low {1}. Waiting for breakout...", _refHigh, _refLow);
+            }
+
+            if (!_isWaiting) return;
+
+            // Logic for Long Only: Cancel if price hits Low first
+            if (Mode == DirectionMode.LongOnly)
+            {
+                if (Symbol.Bid < _refLow) 
+                { 
+                    _isWaiting = false; 
+                    Print("Invalidated: Short breakout occurred first. Day cancelled.");
+                    return; 
+                }
+                if (Symbol.Ask > _refHigh) ExecuteCleanTrade(TradeType.Buy, _refLow);
+            }
+            // Logic for Short Only: Cancel if price hits High first
+            else if (Mode == DirectionMode.ShortOnly)
+            {
+                if (Symbol.Ask > _refHigh) 
+                { 
+                    _isWaiting = false; 
+                    Print("Invalidated: Long breakout occurred first. Day cancelled.");
+                    return; 
+                }
+                if (Symbol.Bid < _refLow) ExecuteCleanTrade(TradeType.Sell, _refHigh);
+            }
+            // Logic for Both: First touch wins
+            else if (Mode == DirectionMode.Both)
+            {
+                if (Symbol.Ask > _refHigh) ExecuteCleanTrade(TradeType.Buy, _refLow);
+                else if (Symbol.Bid < _refLow) ExecuteCleanTrade(TradeType.Sell, _refHigh);
+            }
+        }
+
+        private void ExecuteCleanTrade(TradeType type, double ghostStopLevel)
+        {
+            _isWaiting = false;
+
+            double entryPrice = (type == TradeType.Buy) ? Symbol.Ask : Symbol.Bid;
+            double distance = Math.Abs(entryPrice - ghostStopLevel);
+
+            if (distance <= 0) return;
+
+            // Risk Calculation
+            double riskInCurrency = Account.Balance * (RiskPercentage / 100);
+            double rawVolume = riskInCurrency / (distance / entryPrice);
+            double volumeUnits = Symbol.NormalizeVolumeInUnits(rawVolume);
+
+            double tpPips = (distance / Symbol.PipSize) * RewardRatio;
+
+            // Market Order with calculated Take Profit
+            ExecuteMarketOrder(type, SymbolName, volumeUnits, "Breakout", null, tpPips);
+            
+            Print("{0} breakout executed. Volume: {1} units.", type, volumeUnits);
+        }
+    }
+}
