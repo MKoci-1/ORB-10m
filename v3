@@ -1,0 +1,70 @@
+using System;
+using cAlgo.API;
+using cAlgo.API.Internals;
+
+namespace cAlgo.Robots
+{
+    [Robot(TimeZone = TimeZones.CentralEuropeStandardTime, AccessRights = AccessRights.None)]
+    public class EURUSD_MorningBreakout_Clean : Robot
+    {
+        [Parameter("Risk %", DefaultValue = 1.0)]
+        public double RiskPercentage { get; set; }
+
+        [Parameter("Reward Ratio", DefaultValue = 2.0)]
+        public double RewardRatio { get; set; }
+
+        private double _refHigh;
+        private double _refLow;
+        private bool _isWaiting;
+        private DateTime _lastTradeDate;
+
+        protected override void OnTick()
+        {
+            var now = Server.Time;
+
+            // At 08:00 CET, evaluate the 07:50 - 08:00 (10m) candle
+            if (now.Hour == 8 && now.Minute == 0 && _lastTradeDate.Date != now.Date)
+            {
+                var candle = Bars.Last(1);
+                _refHigh = candle.High;
+                _refLow = candle.Low;
+                _isWaiting = true;
+                _lastTradeDate = now.Date;
+            }
+
+            if (!_isWaiting) return;
+
+            if (Symbol.Ask > _refHigh)
+                ExecuteCleanTrade(TradeType.Buy, _refLow);
+            else if (Symbol.Bid < _refLow)
+                ExecuteCleanTrade(TradeType.Sell, _refHigh);
+        }
+
+        private void ExecuteCleanTrade(TradeType type, double ghostStopLevel)
+        {
+            _isWaiting = false;
+
+            double entryPrice = (type == TradeType.Buy) ? Symbol.Ask : Symbol.Bid;
+            double distance = Math.Abs(entryPrice - ghostStopLevel);
+
+            if (distance <= 0) return;
+
+            // 1. Calculate the EUR risk (1% of 82,000 = 820 EUR)
+            double riskInCurrency = Account.Balance * (RiskPercentage / 100);
+
+            // 2. Calculate Volume: (Risk / Distance) * (EntryPrice if EUR is Base)
+            // For EURUSD on a EUR account, this ensures the 'ghost' loss equals 1%
+            double rawVolume = riskInCurrency / (distance / entryPrice);
+            double volumeUnits = Symbol.NormalizeVolumeInUnits(rawVolume);
+
+            // 3. Calculate Take Profit distance based on the 'ghost' stop loss distance
+            double tpPips = (distance / Symbol.PipSize) * RewardRatio;
+
+            // Execute: No Stop Loss is ever sent to the broker.
+            ExecuteMarketOrder(type, SymbolName, volumeUnits, "Breakout", null, tpPips);
+            
+            Print("Trade opened with {0} units. Risking {1} EUR based on ghost SL at {2}", 
+                volumeUnits, riskInCurrency, ghostStopLevel);
+        }
+    }
+}
