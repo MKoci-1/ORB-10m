@@ -1,0 +1,97 @@
+using System;
+using cAlgo.API;
+using cAlgo.API.Internals;
+
+namespace cAlgo.Robots
+{
+    public enum DirectionMode { Both, LongOnly, ShortOnly }
+
+    [Robot(TimeZone = TimeZones.CentralEuropeStandardTime, AccessRights = AccessRights.None)]
+    public class EURUSD_MorningBreakout_Final : Robot
+    {
+        [Parameter("Trade Direction", DefaultValue = DirectionMode.Both)]
+        public DirectionMode Mode { get; set; }
+
+        [Parameter("Risk %", DefaultValue = 1.0)]
+        public double RiskPercentage { get; set; }
+
+        [Parameter("Reward Ratio", DefaultValue = 2.0)]
+        public double RewardRatio { get; set; }
+
+        [Parameter("Breakout Buffer (Price)", DefaultValue = 0.00003)]
+        public double Buffer { get; set; }
+
+        private double _refHigh, _refLow;
+        private bool _isWaiting;
+        private DateTime _lastTradeDate;
+
+        protected override void OnTick()
+        {
+            var now = Server.Time;
+
+            // 1. Setup Range at 08:00
+            if (now.Hour == 8 && now.Minute == 0 && _lastTradeDate.Date != now.Date)
+            {
+                var candle = Bars.Last(1); 
+                _refHigh = candle.High;
+                _refLow = candle.Low;
+                _isWaiting = true;
+                _lastTradeDate = now.Date;
+                Print("Range set: High {0}, Low {1}. Buffer: {2}", _refHigh, _refLow, Buffer);
+            }
+
+            if (!_isWaiting) return;
+
+            // Define trigger levels including buffer
+            double longTrigger = _refHigh + Buffer;
+            double shortTrigger = _refLow - Buffer;
+
+            if (Mode == DirectionMode.LongOnly)
+            {
+                if (Symbol.Bid < _refLow) { _isWaiting = false; return; }
+                if (Symbol.Ask >= longTrigger) ExecuteCleanTrade(TradeType.Buy, _refLow);
+            }
+            else if (Mode == DirectionMode.ShortOnly)
+            {
+                if (Symbol.Ask > _refHigh) { _isWaiting = false; return; }
+                if (Symbol.Bid <= shortTrigger) ExecuteCleanTrade(TradeType.Sell, _refHigh);
+            }
+            else if (Mode == DirectionMode.Both)
+            {
+                if (Symbol.Ask >= longTrigger) ExecuteCleanTrade(TradeType.Buy, _refLow);
+                else if (Symbol.Bid <= shortTrigger) ExecuteCleanTrade(TradeType.Sell, _refHigh);
+            }
+        }
+
+        private void ExecuteCleanTrade(TradeType type, double stopLevel)
+        {
+            _isWaiting = false;
+
+            double entryPrice = (type == TradeType.Buy) ? Symbol.Ask : Symbol.Bid;
+            double distance = Math.Abs(entryPrice - stopLevel);
+
+            if (distance <= 0) return;
+
+            // Risk Calculation: (Balance * Risk%) / (Distance in Price * Pip Value equivalent)
+            double riskInCurrency = Account.Balance * (RiskPercentage / 100);
+            
+            // Convert price distance to pips for standard volume calculation
+            double slPips = distance / Symbol.PipSize;
+            double volumeUnits = Symbol.NormalizeVolumeInUnits(riskInCurrency / (slPips * Symbol.PipValue));
+
+            if (volumeUnits < Symbol.VolumeInUnitsMin)
+            {
+                Print("Risk too low for minimum volume.");
+                return;
+            }
+
+            double tpPips = slPips * RewardRatio;
+
+            // Note: Stop Loss is set exactly at the opposite of the 08:00 candle
+            var result = ExecuteMarketOrder(type, SymbolName, volumeUnits, "Breakout", slPips, tpPips);
+
+            if (result.IsSuccessful)
+                Print("{0} executed at {1} with SL {2} pips", type, entryPrice, slPips);
+        }
+    }
+}
