@@ -1,0 +1,72 @@
+using System;
+using cAlgo.API;
+using cAlgo.API.Internals;
+
+namespace cAlgo.Robots
+{
+    [Robot(TimeZone = TimeZones.CentralEuropeStandardTime, AccessRights = AccessRights.None)]
+    public class EURUSD_MorningBreakout : Robot
+    {
+        [Parameter("Risk %", DefaultValue = 1.0)]
+        public double RiskPercentage { get; set; }
+
+        [Parameter("Reward Ratio", DefaultValue = 2.0)]
+        public double RewardRatio { get; set; }
+
+        private double _refHigh;
+        private double _refLow;
+        private bool _isWaiting;
+        private DateTime _lastTradeDate;
+
+        protected override void OnTick()
+        {
+            var now = Server.Time;
+
+            // Identify the 07:50 - 08:00 candle range at 08:00 Czechia time
+            if (now.Hour == 8 && now.Minute == 0 && _lastTradeDate.Date != now.Date)
+            {
+                var candle = Bars.Last(1);
+                _refHigh = candle.High;
+                _refLow = candle.Low;
+                _isWaiting = true;
+                _lastTradeDate = now.Date;
+            }
+
+            if (!_isWaiting) return;
+
+            // Breakout detection
+            if (Symbol.Ask > _refHigh)
+                OpenAndModify(TradeType.Buy, _refLow);
+            else if (Symbol.Bid < _refLow)
+                OpenAndModify(TradeType.Sell, _refHigh);
+        }
+
+        private void OpenAndModify(TradeType type, double stopLevel)
+        {
+            _isWaiting = false;
+
+            double entryPrice = (type == TradeType.Buy) ? Symbol.Ask : Symbol.Bid;
+            double distance = Math.Abs(entryPrice - stopLevel);
+
+            if (distance <= 0) return;
+
+            // 1% Risk Calculation for EURUSD
+            double riskInCurrency = Account.Balance * (RiskPercentage / 100);
+            double rawVolume = riskInCurrency / (distance * Symbol.LotSize / Symbol.Ask);
+            double volumeUnits = Symbol.NormalizeVolumeInUnits(rawVolume * Symbol.LotSize);
+
+            double slPips = distance / Symbol.PipSize;
+            double tpPips = slPips * RewardRatio;
+
+            // 1. Place the trade with SL to satisfy the logic
+            var result = ExecuteMarketOrder(type, SymbolName, volumeUnits, "Breakout", slPips, tpPips);
+
+            // 2. Immediately remove the Stop Loss
+            if (result.IsSuccessful)
+            {
+                ModifyPosition(result.Position, null, result.Position.TakeProfit);
+                Print("Trade opened and Stop Loss removed as requested.");
+            }
+        }
+    }
+}
